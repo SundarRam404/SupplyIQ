@@ -59,6 +59,8 @@ class SupplyIQ:
             return "🟠 MEDIUM"
         if value == "HIGH":
             return "🔴 HIGH"
+        if value == "NOT RUN":
+            return "⚪ NOT RUN"
         return "⚪ UNKNOWN"
 
     def _chunk_text(self, text: str, chunk_size: int = 1400, overlap: int = 200) -> List[str]:
@@ -100,6 +102,7 @@ class SupplyIQ:
                 "LOW": "#22c55e",
                 "MEDIUM": "#f59e0b",
                 "HIGH": "#ef4444",
+                "NOT RUN": "#94a3b8",
                 "UNKNOWN": "#94a3b8",
             }.get(value.upper(), "#94a3b8")
             return f"""
@@ -187,33 +190,131 @@ CONTRACT PROFILE
         if self.last_ai_risk_snapshot is not None:
             return self.last_ai_risk_snapshot
 
+        has_erp = self.df is not None and not self.df.empty
+        has_contract = bool(self.doc_chunks)
+
+        if not has_erp and not has_contract:
+            snapshot = {
+                "demand_risk": "NOT RUN",
+                "contract_risk": "NOT RUN",
+                "inventory_risk": "NOT RUN",
+                "demand_reason": "No ERP data uploaded yet.",
+                "contract_reason": "No supplier contract uploaded yet.",
+                "inventory_reason": "No ERP data uploaded yet.",
+                "demand_evidence": "Waiting for CSV upload.",
+                "contract_evidence": "Waiting for PDF upload.",
+                "inventory_evidence": "Waiting for CSV upload.",
+                "raw_response": "No inputs uploaded.",
+            }
+            self.last_ai_risk_snapshot = snapshot
+            return snapshot
+
+        if not has_erp:
+            snapshot = {
+                "demand_risk": "NOT RUN",
+                "contract_risk": "NOT RUN" if not has_contract else "MEDIUM",
+                "inventory_risk": "NOT RUN",
+                "demand_reason": "No ERP data uploaded yet.",
+                "contract_reason": "Contract uploaded, but full contract risk analysis has limited operational evidence.",
+                "inventory_reason": "No ERP data uploaded yet.",
+                "demand_evidence": "Waiting for CSV upload.",
+                "contract_evidence": f"Indexed chunks: {len(self.doc_chunks)}",
+                "inventory_evidence": "Waiting for CSV upload.",
+                "raw_response": "ERP data missing.",
+            }
+            self.last_ai_risk_snapshot = snapshot
+            return snapshot
+
+        if not has_contract:
+            data_profile = self._build_data_profile()
+            forecast_metrics = self.last_forecast_metrics or {}
+            anomaly_metrics = self.last_anomaly_metrics or {}
+
+            prompt = f"""
+You are SupplyIQ's Risk Scoring AI.
+
+Calculate ONLY these two risks from ERP evidence:
+1. DEMAND_FORECAST_RISK
+2. INVENTORY_RISK
+
+IMPORTANT:
+- Do not invent contract risk.
+- Contract risk must be NOT RUN because no supplier contract has been uploaded.
+- Base your reasoning only on ERP data, forecast metrics, and anomaly metrics.
+
+Return EXACTLY in this format:
+
+DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH
+INVENTORY_RISK: LOW or MEDIUM or HIGH
+DEMAND_REASON: <one sentence>
+INVENTORY_REASON: <one sentence>
+DEMAND_EVIDENCE: <short evidence line>
+INVENTORY_EVIDENCE: <short evidence line>
+
+ERP / DEMAND CONTEXT:
+{data_profile}
+
+FORECAST METRICS:
+{forecast_metrics}
+
+ANOMALY METRICS:
+{anomaly_metrics}
+""".strip()
+
+            result = self._llm_generate(prompt)
+
+            def extract(label: str, default: str = "MEDIUM") -> str:
+                match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH)", result, re.IGNORECASE)
+                return match.group(1).upper() if match else default
+
+            def extract_text(label: str, default: str) -> str:
+                match = re.search(rf"{label}:\s*(.+)", result)
+                return match.group(1).strip() if match else default
+
+            snapshot = {
+                "demand_risk": extract("DEMAND_FORECAST_RISK"),
+                "contract_risk": "NOT RUN",
+                "inventory_risk": extract("INVENTORY_RISK"),
+                "demand_reason": extract_text("DEMAND_REASON", "AI demand risk reasoning unavailable."),
+                "contract_reason": "No supplier contract uploaded yet.",
+                "inventory_reason": extract_text("INVENTORY_REASON", "AI inventory risk reasoning unavailable."),
+                "demand_evidence": extract_text("DEMAND_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
+                "contract_evidence": "Waiting for PDF upload.",
+                "inventory_evidence": extract_text("INVENTORY_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
+                "raw_response": result,
+            }
+            self.last_ai_risk_snapshot = snapshot
+            return snapshot
+
         data_profile = self._build_data_profile()
         contract_profile = self._build_contract_profile()
-
         forecast_metrics = self.last_forecast_metrics or {}
         anomaly_metrics = self.last_anomaly_metrics or {}
 
         prompt = f"""
 You are SupplyIQ's Risk Scoring AI.
 
-Your job is to calculate THREE business risks using AI reasoning:
+Your job is to calculate THREE business risks:
 1. DEMAND_FORECAST_RISK
 2. SUPPLIER_CONTRACT_RISK
 3. INVENTORY_RISK
 
-You must use the ERP profile, contract profile, anomaly results, and forecast metrics if available.
-If some information is missing, infer conservatively from what exists.
-Do NOT return UNKNOWN unless absolutely impossible.
+Use the ERP profile, contract profile, anomaly results, and forecast metrics.
+Be strict and evidence-based. Do NOT guess from missing data.
 
 Return EXACTLY in this format:
 
 DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH
 SUPPLIER_CONTRACT_RISK: LOW or MEDIUM or HIGH
 INVENTORY_RISK: LOW or MEDIUM or HIGH
-RATIONALE:
-- Demand: ...
-- Contract: ...
-- Inventory: ...
+
+DEMAND_REASON: <one sentence>
+SUPPLIER_CONTRACT_REASON: <one sentence>
+INVENTORY_REASON: <one sentence>
+
+DEMAND_EVIDENCE: <short evidence line>
+SUPPLIER_CONTRACT_EVIDENCE: <short evidence line>
+INVENTORY_EVIDENCE: <short evidence line>
 
 ERP / DEMAND CONTEXT:
 {data_profile}
@@ -230,14 +331,24 @@ CONTRACT CONTEXT:
 
         result = self._llm_generate(prompt)
 
-        def extract(label: str) -> str:
+        def extract(label: str, default: str = "MEDIUM") -> str:
             match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH)", result, re.IGNORECASE)
-            return match.group(1).upper() if match else "MEDIUM"
+            return match.group(1).upper() if match else default
+
+        def extract_text(label: str, default: str) -> str:
+            match = re.search(rf"{label}:\s*(.+)", result)
+            return match.group(1).strip() if match else default
 
         snapshot = {
             "demand_risk": extract("DEMAND_FORECAST_RISK"),
             "contract_risk": extract("SUPPLIER_CONTRACT_RISK"),
             "inventory_risk": extract("INVENTORY_RISK"),
+            "demand_reason": extract_text("DEMAND_REASON", "AI demand risk reasoning unavailable."),
+            "contract_reason": extract_text("SUPPLIER_CONTRACT_REASON", "AI contract risk reasoning unavailable."),
+            "inventory_reason": extract_text("INVENTORY_REASON", "AI inventory risk reasoning unavailable."),
+            "demand_evidence": extract_text("DEMAND_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
+            "contract_evidence": extract_text("SUPPLIER_CONTRACT_EVIDENCE", "Contract clauses and supplier obligations"),
+            "inventory_evidence": extract_text("INVENTORY_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
             "raw_response": result,
         }
 
@@ -247,9 +358,9 @@ CONTRACT CONTEXT:
     def get_kpi_dashboard(self) -> str:
         snapshot = self._get_ai_risk_snapshot()
 
-        demand_risk = snapshot.get("demand_risk", "MEDIUM")
-        contract_risk = snapshot.get("contract_risk", "MEDIUM")
-        inventory_risk = snapshot.get("inventory_risk", "MEDIUM")
+        demand_risk = snapshot.get("demand_risk", "NOT RUN")
+        contract_risk = snapshot.get("contract_risk", "NOT RUN")
+        inventory_risk = snapshot.get("inventory_risk", "NOT RUN")
 
         return self._build_kpi_html(demand_risk, contract_risk, inventory_risk)
 
@@ -487,16 +598,6 @@ CONTRACT CONTEXT:
         if not lines:
             lines = ["• No major anomalies detected in the uploaded ERP data."]
 
-        summary = f"""
-## Demand Risk Detection Report
-
-**Risk Level:** {self._risk_badge(risk)}  
-**Headline:** {headline}
-
-### Detected Events
-{chr(10).join(lines)}
-""".strip()
-
         metrics = {
             "risk_level": risk,
             "headline": headline,
@@ -504,10 +605,34 @@ CONTRACT CONTEXT:
             "anomaly_rate_pct": anomaly_rate,
         }
 
-        self.last_anomaly_summary = summary
-        self.last_anomaly_records = records
         self.last_anomaly_metrics = metrics
         self.last_ai_risk_snapshot = None
+        snapshot = self._get_ai_risk_snapshot()
+
+        final_risk = snapshot.get("demand_risk", risk)
+        final_reason = snapshot.get("demand_reason", headline)
+        final_evidence = snapshot.get(
+            "demand_evidence",
+            f"Anomaly count={len(anomalies)}, anomaly rate={anomaly_rate:.2f}%"
+        )
+
+        summary = f"""
+## Demand Risk Detection Report
+
+**Risk Level:** {self._risk_badge(final_risk)}  
+**Why:** {final_reason}  
+**Evidence:** {final_evidence}
+
+### Detected Events
+{chr(10).join(lines)}
+""".strip()
+
+        metrics["risk_level"] = final_risk
+        metrics["headline"] = final_reason
+        metrics["evidence"] = final_evidence
+
+        self.last_anomaly_summary = summary
+        self.last_anomaly_records = records
 
         return summary, records, metrics
 
@@ -614,6 +739,22 @@ Contract context:
 
         self.last_contract_report = report
         self.last_ai_risk_snapshot = None
+        snapshot = self._get_ai_risk_snapshot()
+
+        final_contract_risk = snapshot.get("contract_risk", self.last_contract_risk)
+        final_contract_reason = snapshot.get("contract_reason", "AI contract reasoning unavailable.")
+        final_contract_evidence = snapshot.get("contract_evidence", "Contract clauses and obligations")
+
+        report = f"""
+{report}
+
+## Final AI Contract Risk
+**Risk Level:** {self._risk_badge(final_contract_risk)}  
+**Why:** {final_contract_reason}  
+**Evidence:** {final_contract_evidence}
+""".strip()
+
+        self.last_contract_report = report
         return report
 
     def query_documents(self, query: str) -> str:
