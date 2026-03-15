@@ -464,4 +464,5 @@ export default function HomePage() {
               {scenarioReport ? <MarkdownCard content={scenarioReport} /> : <div className="empty-state">Scenario simulation output will appear here.</div>}
             </div>
           </div>
-        )}
+        )
+}
