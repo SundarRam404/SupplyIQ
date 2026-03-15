@@ -453,8 +453,11 @@ export default function HomePage() {
                 <option>Forecast error causes over-ordering</option>
                 <option>Custom scenario (write your own below)</option>
               </select>
-              <input type="number" value={customPercent} onChange={(e) => setCustomPercent(e.target.value)} placeholder="Demand increase %" />
-              <textarea value={customScenarioText} onChange={(e) => setCustomScenarioText(e.target.value)} placeholder="Example: Supplier delay increases by 18 days and demand rises by 40% next month." />
+              <textarea
+                value={customScenarioText}
+                onChange={(e) => setCustomScenarioText(e.target.value)}
+                placeholder="Example: Supplier delay increases by 18 days and demand rises by 40% next month."
+              />
               <button className="primary-btn" onClick={runScenario}>Run Scenario Simulation</button>
             </div>
             <div className="report-card">
@@ -462,7 +465,3 @@ export default function HomePage() {
             </div>
           </div>
         )}
-      </section>
-    </main>
-  )
-}
