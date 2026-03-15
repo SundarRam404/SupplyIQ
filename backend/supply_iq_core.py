@@ -9,6 +9,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from pypdf import PdfReader
 from groq import Groq
+from sentence_transformers import SentenceTransformer
 
 
 class SupplyIQ:
@@ -24,6 +25,8 @@ class SupplyIQ:
         self.vectorizer: Optional[TfidfVectorizer] = None
         self.doc_matrix = None
         self.doc_filename: Optional[str] = None
+        self.embedder: Optional[SentenceTransformer] = None
+        self.doc_embeddings = None
 
         # Cached outputs
         self.last_forecast_summary: Optional[str] = None
@@ -80,7 +83,17 @@ class SupplyIQ:
         return chunks
 
     def _retrieve_relevant_context(self, query: str, top_k: int = 4) -> str:
-        if self.vectorizer is None or self.doc_matrix is None or not self.doc_chunks:
+        if not self.doc_chunks:
+            return ""
+
+        if self.embedder is not None and self.doc_embeddings is not None:
+            query_embedding = self.embedder.encode([query], convert_to_numpy=True)
+            scores = cosine_similarity(query_embedding, self.doc_embeddings).flatten()
+            top_indices = scores.argsort()[::-1][:top_k]
+            selected = [self.doc_chunks[i] for i in top_indices if scores[i] > 0]
+            return "\n\n".join(selected)
+
+        if self.vectorizer is None or self.doc_matrix is None:
             return ""
 
         query_vec = self.vectorizer.transform([query])
@@ -499,17 +512,52 @@ CONTRACT CONTEXT:
             risk = "LOW"
             reason = "Demand pattern appears comparatively stable."
 
-        summary = f"""
+        forecast_preview = upcoming.head(12).copy()
+        forecast_preview["ds"] = forecast_preview["ds"].dt.strftime("%Y-%m-%d")
+
+        forecast_lines = []
+        for _, row in forecast_preview.iterrows():
+            forecast_lines.append(
+                f"{row['ds']}: yhat={row['yhat']:.2f}, lower={row['yhat_lower']:.2f}, upper={row['yhat_upper']:.2f}"
+            )
+
+        ai_prompt = f"""
+You are SupplyIQ's forecasting analyst.
+
+Use the REAL forecast values below to write a grounded supply-chain forecast interpretation.
+Do not invent patterns not visible in the numbers.
+Do not give vague generic commentary.
+
+Return EXACTLY in this format:
+
 ## AI Forecast Insight
 
-**Expected average daily demand:** {avg_demand:.1f} units  
-**Peak predicted demand:** {peak_demand:.1f} units  
-**Recommended inventory buffer:** {recommended_inventory} units  
-**Historical MAPE:** {0 if np.isnan(mape) else mape:.2f}%  
+**Expected average daily demand:** <number> units  
+**Peak predicted demand:** <number> units  
+**Recommended inventory buffer:** <number> units  
+**Historical MAPE:** <number>%  
 
-**Demand Forecast Risk:** {self._risk_badge(risk)}  
-**Reason:** {reason}
+**Demand Forecast Risk:** LOW or MEDIUM or HIGH  
+**Reason:** <one specific sentence based on the actual forecast values>
+
+**Observed Forecast Pattern:**
+- <bullet 1>
+- <bullet 2>
+- <bullet 3>
+
+REAL FORECAST VALUES:
+{chr(10).join(forecast_lines)}
+
+FORECAST METRICS:
+- avg_demand: {avg_demand:.2f}
+- peak_demand: {peak_demand:.2f}
+- recommended_inventory: {recommended_inventory}
+- mape: {0 if np.isnan(mape) else mape:.2f}
+- volatility_pct: {volatility_pct:.2f}
+- peak_to_avg_ratio: {peak_to_avg_ratio:.2f}
 """.strip()
+
+        summary = self._llm_generate(ai_prompt)
 
         self.last_forecast_summary = summary
         self.last_forecast_records = upcoming.to_dict(orient="records")
@@ -665,6 +713,14 @@ CONTRACT CONTEXT:
 
         self.vectorizer = TfidfVectorizer(stop_words="english")
         self.doc_matrix = self.vectorizer.fit_transform(self.doc_chunks)
+
+        try:
+            self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+            self.doc_embeddings = self.embedder.encode(self.doc_chunks, convert_to_numpy=True)
+        except Exception:
+            self.embedder = None
+            self.doc_embeddings = None
+
         self.last_contract_report = None
         self.last_contract_risk = "UNKNOWN"
         self.last_decision_report = None
