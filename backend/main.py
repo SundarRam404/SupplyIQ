@@ -9,21 +9,18 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
+
 from supply_iq_core import SupplyIQ
 
 API_KEY = os.environ.get("GROQ_API_KEY")
 if not API_KEY:
     raise ValueError("GROQ_API_KEY not found in environment variables.")
 
-app = FastAPI()
+app = FastAPI(title="SupplyIQ API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://supply-iq-nu.vercel.app",
-        "http://localhost:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,13 +53,25 @@ def dashboard():
 
 @app.post("/upload/csv")
 async def upload_csv(file: UploadFile = File(...)):
-    suffix = Path(file.filename or "data.csv").suffix or ".csv"
-    temp_path = TEMP_DIR / f"erp_upload{suffix}"
-    with temp_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    try:
+        suffix = Path(file.filename or "data.csv").suffix or ".csv"
+        temp_path = TEMP_DIR / f"erp_upload{suffix}"
 
-    status = system.load_erp_data(str(temp_path))
-    return {"status": status, "dashboard_html": system.get_kpi_dashboard()}
+        with temp_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        status = system.load_erp_data(str(temp_path))
+
+        return {
+            "status": status,
+            "dashboard_html": system.get_kpi_dashboard(),
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV upload failed: {str(e)}",
+        )
 
 
 @app.post("/upload/pdf")
