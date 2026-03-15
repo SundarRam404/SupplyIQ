@@ -9,18 +9,21 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+from fastapi.middleware.cors import CORSMiddleware
 from supply_iq_core import SupplyIQ
 
 API_KEY = os.environ.get("GROQ_API_KEY")
 if not API_KEY:
     raise ValueError("GROQ_API_KEY not found in environment variables.")
 
-app = FastAPI(title="SupplyIQ API", version="1.0.0")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://supply-iq-nu.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
