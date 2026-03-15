@@ -199,6 +199,45 @@ CONTRACT PROFILE
 {context[:3000]}
 """.strip()
 
+    def _compute_unified_risk_inputs(self) -> Dict:
+        if self.df is None or self.df.empty:
+            return {
+                "demand_cv": None,
+                "volatility_pct": None,
+                "peak_to_avg_ratio": None,
+                "mape": None,
+                "anomaly_rate_pct": None,
+                "avg_delay": None,
+                "delay_cv": None,
+                "inventory_buffer_days": None,
+            }
+
+        demand_mean = float(self.df["y"].mean()) if len(self.df) else 0.0
+        demand_std = float(self.df["y"].std()) if len(self.df) > 1 else 0.0
+        demand_cv = (demand_std / demand_mean) if demand_mean > 0 else 0.0
+
+        avg_delay = float(self.df["delivery_delay_days"].mean()) if "delivery_delay_days" in self.df.columns else 0.0
+        delay_std = float(self.df["delivery_delay_days"].std()) if "delivery_delay_days" in self.df.columns and len(self.df) > 1 else 0.0
+        delay_cv = (delay_std / avg_delay) if avg_delay > 0 else 0.0
+
+        forecast_metrics = self.last_forecast_metrics or {}
+        anomaly_metrics = self.last_anomaly_metrics or {}
+
+        avg_demand = float(forecast_metrics.get("avg_demand", demand_mean or 0.0))
+        recommended_inventory = float(forecast_metrics.get("recommended_inventory", 0.0))
+        inventory_buffer_days = (recommended_inventory / avg_demand) if avg_demand > 0 else 0.0
+
+        return {
+            "demand_cv": demand_cv,
+            "volatility_pct": float(forecast_metrics.get("volatility_pct", 0.0)),
+            "peak_to_avg_ratio": float(forecast_metrics.get("peak_to_avg_ratio", 1.0)),
+            "mape": float(forecast_metrics.get("mape", 0.0)),
+            "anomaly_rate_pct": float(anomaly_metrics.get("anomaly_rate_pct", 0.0)),
+            "avg_delay": avg_delay,
+            "delay_cv": delay_cv,
+            "inventory_buffer_days": inventory_buffer_days,
+        }
+
     def _get_ai_risk_snapshot(self) -> Dict:
         if self.last_ai_risk_snapshot is not None:
             return self.last_ai_risk_snapshot
@@ -222,104 +261,28 @@ CONTRACT PROFILE
             self.last_ai_risk_snapshot = snapshot
             return snapshot
 
-        if not has_erp:
-            snapshot = {
-                "demand_risk": "NOT RUN",
-                "contract_risk": "NOT RUN" if not has_contract else "MEDIUM",
-                "inventory_risk": "NOT RUN",
-                "demand_reason": "No ERP data uploaded yet.",
-                "contract_reason": "Contract uploaded, but full contract risk analysis has limited operational evidence.",
-                "inventory_reason": "No ERP data uploaded yet.",
-                "demand_evidence": "Waiting for CSV upload.",
-                "contract_evidence": f"Indexed chunks: {len(self.doc_chunks)}",
-                "inventory_evidence": "Waiting for CSV upload.",
-                "raw_response": "ERP data missing.",
-            }
-            self.last_ai_risk_snapshot = snapshot
-            return snapshot
-
-        if not has_contract:
-            data_profile = self._build_data_profile()
-            forecast_metrics = self.last_forecast_metrics or {}
-            anomaly_metrics = self.last_anomaly_metrics or {}
-
-            prompt = f"""
-You are SupplyIQ's Risk Scoring AI.
-
-Calculate ONLY these two risks from ERP evidence:
-1. DEMAND_FORECAST_RISK
-2. INVENTORY_RISK
-
-IMPORTANT:
-- Do not invent contract risk.
-- Contract risk must be NOT RUN because no supplier contract has been uploaded.
-- Base your reasoning only on ERP data, forecast metrics, and anomaly metrics.
-
-Return EXACTLY in this format:
-
-DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH
-INVENTORY_RISK: LOW or MEDIUM or HIGH
-DEMAND_REASON: <one sentence>
-INVENTORY_REASON: <one sentence>
-DEMAND_EVIDENCE: <short evidence line>
-INVENTORY_EVIDENCE: <short evidence line>
-
-ERP / DEMAND CONTEXT:
-{data_profile}
-
-FORECAST METRICS:
-{forecast_metrics}
-
-ANOMALY METRICS:
-{anomaly_metrics}
-""".strip()
-
-            result = self._llm_generate(prompt)
-
-            def extract(label: str, default: str = "MEDIUM") -> str:
-                match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH)", result, re.IGNORECASE)
-                return match.group(1).upper() if match else default
-
-            def extract_text(label: str, default: str) -> str:
-                match = re.search(rf"{label}:\s*(.+)", result)
-                return match.group(1).strip() if match else default
-
-            snapshot = {
-                "demand_risk": extract("DEMAND_FORECAST_RISK"),
-                "contract_risk": "NOT RUN",
-                "inventory_risk": extract("INVENTORY_RISK"),
-                "demand_reason": extract_text("DEMAND_REASON", "AI demand risk reasoning unavailable."),
-                "contract_reason": "No supplier contract uploaded yet.",
-                "inventory_reason": extract_text("INVENTORY_REASON", "AI inventory risk reasoning unavailable."),
-                "demand_evidence": extract_text("DEMAND_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
-                "contract_evidence": "Waiting for PDF upload.",
-                "inventory_evidence": extract_text("INVENTORY_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
-                "raw_response": result,
-            }
-            self.last_ai_risk_snapshot = snapshot
-            return snapshot
-
+        unified = self._compute_unified_risk_inputs()
         data_profile = self._build_data_profile()
-        contract_profile = self._build_contract_profile()
-        forecast_metrics = self.last_forecast_metrics or {}
-        anomaly_metrics = self.last_anomaly_metrics or {}
+        contract_profile = self._build_contract_profile() if has_contract else "No supplier contract uploaded."
 
         prompt = f"""
-You are SupplyIQ's Risk Scoring AI.
+You are SupplyIQ's unified risk engine.
 
-Your job is to calculate THREE business risks:
-1. DEMAND_FORECAST_RISK
-2. SUPPLIER_CONTRACT_RISK
-3. INVENTORY_RISK
+You are the SINGLE source of truth for all risk values shown anywhere in the app.
 
-Use the ERP profile, contract profile, anomaly results, and forecast metrics.
-Be strict and evidence-based. Do NOT guess from missing data.
+Rules:
+- Use the metrics below consistently.
+- Do not contradict yourself.
+- If no contract is uploaded, SUPPLIER_CONTRACT_RISK must be NOT RUN.
+- If ERP data is missing, DEMAND_FORECAST_RISK and INVENTORY_RISK must be NOT RUN.
+- Be strict, specific, and evidence-based.
+- The same data should produce the same final risk labels everywhere.
 
 Return EXACTLY in this format:
 
-DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH
-SUPPLIER_CONTRACT_RISK: LOW or MEDIUM or HIGH
-INVENTORY_RISK: LOW or MEDIUM or HIGH
+DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH or NOT RUN
+SUPPLIER_CONTRACT_RISK: LOW or MEDIUM or HIGH or NOT RUN
+INVENTORY_RISK: LOW or MEDIUM or HIGH or NOT RUN
 
 DEMAND_REASON: <one sentence>
 SUPPLIER_CONTRACT_REASON: <one sentence>
@@ -329,23 +292,27 @@ DEMAND_EVIDENCE: <short evidence line>
 SUPPLIER_CONTRACT_EVIDENCE: <short evidence line>
 INVENTORY_EVIDENCE: <short evidence line>
 
-ERP / DEMAND CONTEXT:
+UNIFIED METRICS:
+- demand_cv: {unified['demand_cv']}
+- volatility_pct: {unified['volatility_pct']}
+- peak_to_avg_ratio: {unified['peak_to_avg_ratio']}
+- mape: {unified['mape']}
+- anomaly_rate_pct: {unified['anomaly_rate_pct']}
+- avg_delay: {unified['avg_delay']}
+- delay_cv: {unified['delay_cv']}
+- inventory_buffer_days: {unified['inventory_buffer_days']}
+
+ERP PROFILE:
 {data_profile}
 
-FORECAST METRICS:
-{forecast_metrics}
-
-ANOMALY METRICS:
-{anomaly_metrics}
-
-CONTRACT CONTEXT:
+CONTRACT PROFILE:
 {contract_profile}
 """.strip()
 
         result = self._llm_generate(prompt)
 
         def extract(label: str, default: str = "MEDIUM") -> str:
-            match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH)", result, re.IGNORECASE)
+            match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH|NOT RUN)", result, re.IGNORECASE)
             return match.group(1).upper() if match else default
 
         def extract_text(label: str, default: str) -> str:
@@ -353,15 +320,15 @@ CONTRACT CONTEXT:
             return match.group(1).strip() if match else default
 
         snapshot = {
-            "demand_risk": extract("DEMAND_FORECAST_RISK"),
-            "contract_risk": extract("SUPPLIER_CONTRACT_RISK"),
-            "inventory_risk": extract("INVENTORY_RISK"),
-            "demand_reason": extract_text("DEMAND_REASON", "AI demand risk reasoning unavailable."),
-            "contract_reason": extract_text("SUPPLIER_CONTRACT_REASON", "AI contract risk reasoning unavailable."),
-            "inventory_reason": extract_text("INVENTORY_REASON", "AI inventory risk reasoning unavailable."),
-            "demand_evidence": extract_text("DEMAND_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
-            "contract_evidence": extract_text("SUPPLIER_CONTRACT_EVIDENCE", "Contract clauses and supplier obligations"),
-            "inventory_evidence": extract_text("INVENTORY_EVIDENCE", "ERP demand profile + forecast/anomaly metrics"),
+            "demand_risk": extract("DEMAND_FORECAST_RISK", "NOT RUN" if not has_erp else "MEDIUM"),
+            "contract_risk": extract("SUPPLIER_CONTRACT_RISK", "NOT RUN" if not has_contract else "MEDIUM"),
+            "inventory_risk": extract("INVENTORY_RISK", "NOT RUN" if not has_erp else "MEDIUM"),
+            "demand_reason": extract_text("DEMAND_REASON", "AI demand reasoning unavailable."),
+            "contract_reason": extract_text("SUPPLIER_CONTRACT_REASON", "AI contract reasoning unavailable."),
+            "inventory_reason": extract_text("INVENTORY_REASON", "AI inventory reasoning unavailable."),
+            "demand_evidence": extract_text("DEMAND_EVIDENCE", "Unified ERP + forecast + anomaly metrics"),
+            "contract_evidence": extract_text("SUPPLIER_CONTRACT_EVIDENCE", "Contract clauses and obligations"),
+            "inventory_evidence": extract_text("INVENTORY_EVIDENCE", "Unified ERP + forecast + anomaly metrics"),
             "raw_response": result,
         }
 
@@ -512,6 +479,12 @@ CONTRACT CONTEXT:
             risk = "LOW"
             reason = "Demand pattern appears comparatively stable."
 
+        self.last_ai_risk_snapshot = None
+        snapshot = self._get_ai_risk_snapshot()
+        final_risk = snapshot.get("demand_risk", risk)
+        final_reason = snapshot.get("demand_reason", reason)
+        final_evidence = snapshot.get("demand_evidence", "Unified forecast evidence")
+
         forecast_preview = upcoming.head(12).copy()
         forecast_preview["ds"] = forecast_preview["ds"].dt.strftime("%Y-%m-%d")
 
@@ -521,43 +494,21 @@ CONTRACT CONTEXT:
                 f"{row['ds']}: yhat={row['yhat']:.2f}, lower={row['yhat_lower']:.2f}, upper={row['yhat_upper']:.2f}"
             )
 
-        ai_prompt = f"""
-You are SupplyIQ's forecasting analyst.
-
-Use the REAL forecast values below to write a grounded supply-chain forecast interpretation.
-Do not invent patterns not visible in the numbers.
-Do not give vague generic commentary.
-
-Return EXACTLY in this format:
-
+        summary = f"""
 ## AI Forecast Insight
 
-**Expected average daily demand:** <number> units  
-**Peak predicted demand:** <number> units  
-**Recommended inventory buffer:** <number> units  
-**Historical MAPE:** <number>%  
+**Expected average daily demand:** {avg_demand:.1f} units  
+**Peak predicted demand:** {peak_demand:.1f} units  
+**Recommended inventory buffer:** {recommended_inventory} units  
+**Historical MAPE:** {0 if np.isnan(mape) else mape:.2f}%  
 
-**Demand Forecast Risk:** LOW or MEDIUM or HIGH  
-**Reason:** <one specific sentence based on the actual forecast values>
+**Demand Forecast Risk:** {self._risk_badge(final_risk)}  
+**Reason:** {final_reason}  
+**Evidence:** {final_evidence}
 
 **Observed Forecast Pattern:**
-- <bullet 1>
-- <bullet 2>
-- <bullet 3>
-
-REAL FORECAST VALUES:
-{chr(10).join(forecast_lines)}
-
-FORECAST METRICS:
-- avg_demand: {avg_demand:.2f}
-- peak_demand: {peak_demand:.2f}
-- recommended_inventory: {recommended_inventory}
-- mape: {0 if np.isnan(mape) else mape:.2f}
-- volatility_pct: {volatility_pct:.2f}
-- peak_to_avg_ratio: {peak_to_avg_ratio:.2f}
+{chr(10).join([f"- {line}" for line in forecast_lines[:3]])}
 """.strip()
-
-        summary = self._llm_generate(ai_prompt)
 
         self.last_forecast_summary = summary
         self.last_forecast_records = upcoming.to_dict(orient="records")
@@ -571,7 +522,6 @@ FORECAST METRICS:
             "volatility_pct": volatility_pct,
             "peak_to_avg_ratio": peak_to_avg_ratio,
         }
-        self.last_ai_risk_snapshot = None
 
         return fig, summary, self.last_forecast_records, self.last_forecast_metrics
 
