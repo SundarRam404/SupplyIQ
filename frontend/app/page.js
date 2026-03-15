@@ -90,7 +90,6 @@ export default function HomePage() {
   const [contractAnswer, setContractAnswer] = useState('')
   const [decisionReport, setDecisionReport] = useState('')
   const [scenarioName, setScenarioName] = useState(defaultScenario)
-  const [customPercent, setCustomPercent] = useState(30)
   const [customScenarioText, setCustomScenarioText] = useState('')
   const [scenarioReport, setScenarioReport] = useState('')
   const [busy, setBusy] = useState('')
@@ -217,7 +216,7 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           scenario_name: scenarioName,
-          custom_percent: Number(customPercent),
+          custom_percent: 30,
           custom_scenario_text: customScenarioText,
         }),
       })
@@ -443,7 +442,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {activeTab === 'scenario' && (
+                {activeTab === 'scenario' && (
           <div className="tab-panel">
             <div className="scenario-controls">
               <select value={scenarioName} onChange={(e) => setScenarioName(e.target.value)}>
@@ -453,16 +452,28 @@ export default function HomePage() {
                 <option>Forecast error causes over-ordering</option>
                 <option>Custom scenario (write your own below)</option>
               </select>
+
               <textarea
                 value={customScenarioText}
                 onChange={(e) => setCustomScenarioText(e.target.value)}
                 placeholder="Example: Supplier delay increases by 18 days and demand rises by 40% next month."
               />
-              <button className="primary-btn" onClick={runScenario}>Run Scenario Simulation</button>
+
+              <button className="primary-btn" onClick={runScenario}>
+                Run Scenario Simulation
+              </button>
             </div>
+
             <div className="report-card">
-              {scenarioReport ? <MarkdownCard content={scenarioReport} /> : <div className="empty-state">Scenario simulation output will appear here.</div>}
+              {scenarioReport ? (
+                <MarkdownCard content={scenarioReport} />
+              ) : (
+                <div className="empty-state">Scenario simulation output will appear here.</div>
+              )}
             </div>
           </div>
-        )
+        )}
+      </section>
+    </main>
+  )
 }
