@@ -56,7 +56,7 @@ const valuePills = [
   'Built around real supply chain workflows',
   'Portfolio-ready premium product UI',
   'Interactive AI workspace for live demos',
-  'Designed to impress recruiters instantly',
+  'Built for explainable operational decisions',
 ]
 
 const commandMetrics = [
@@ -71,8 +71,32 @@ const pipelineSteps = [
   'Present charts, risk signals, and executive guidance in one command center.',
 ]
 
+
+function getSessionId() {
+  if (typeof window === 'undefined') return 'server-session'
+  let sessionId = window.localStorage.getItem('supplyiq_session_id')
+  if (!sessionId) {
+    sessionId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    window.localStorage.setItem('supplyiq_session_id', sessionId)
+  }
+  return sessionId
+}
+
 async function apiCall(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, options)
+  const sessionId = getSessionId()
+  const headers = {
+    ...(options.headers || {}),
+    'X-Session-ID': sessionId,
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  })
+
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.detail || 'Request failed')
   return data
@@ -387,7 +411,14 @@ export default function HomePage() {
             </div>
             <div className="results-grid wide">
               <div className="visual-card">
-                {forecast?.plot_base64 ? (
+                {busy === 'Generating forecast...' ? (
+                  <div className="empty-state">
+                    <div>
+                      <div className="chart-spinner" />
+                      <div style={{ marginTop: '12px' }}>Generating forecast chart...</div>
+                    </div>
+                  </div>
+                ) : forecast?.plot_base64 ? (
                   <img src={`data:image/png;base64,${forecast.plot_base64}`} alt="Forecast plot" className="forecast-image" />
                 ) : (
                   <div className="empty-state">Forecast chart will appear here after running the model.</div>
