@@ -19,7 +19,7 @@ import MarkdownCard from '../components/MarkdownCard'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL
 
-const defaultScenario = 'Demand increase (custom %)'
+const defaultScenario = 'Supplier delay increases by 10 days'
 
 const tabs = [
   { id: 'forecast', label: 'Demand Forecasting' },
@@ -241,7 +241,10 @@ export default function HomePage() {
         body: JSON.stringify({
           scenario_name: scenarioName,
           custom_percent: 30,
-          custom_scenario_text: customScenarioText,
+          custom_scenario_text:
+            scenarioName === 'Custom scenario (write your own below)'
+              ? customScenarioText
+              : '',
         }),
       })
       setScenarioReport(data.report)
@@ -477,18 +480,25 @@ export default function HomePage() {
           <div className="tab-panel">
             <div className="scenario-controls">
               <select value={scenarioName} onChange={(e) => setScenarioName(e.target.value)}>
-                <option>Demand increase (custom %)</option>
                 <option>Supplier delay increases by 10 days</option>
                 <option>Component price rises by 15%</option>
                 <option>Forecast error causes over-ordering</option>
                 <option>Custom scenario (write your own below)</option>
               </select>
 
-              <textarea
-                value={customScenarioText}
-                onChange={(e) => setCustomScenarioText(e.target.value)}
-                placeholder="Example: Supplier delay increases by 18 days and demand rises by 40% next month."
-              />
+              {scenarioName === 'Custom scenario (write your own below)' ? (
+                <textarea
+                  value={customScenarioText}
+                  onChange={(e) => setCustomScenarioText(e.target.value)}
+                  placeholder="Write your custom scenario here. Example: Supplier delay increases by 18 days and demand rises by 40% next month."
+                />
+              ) : (
+                <textarea
+                  value=""
+                  readOnly
+                  placeholder="To write your own scenario, first select 'Custom scenario (write your own below)' from the dropdown."
+                />
+              )}
 
               <button className="primary-btn" onClick={runScenario}>
                 Run Scenario Simulation
