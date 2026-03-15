@@ -3,13 +3,11 @@ from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from prophet import Prophet
 from sklearn.ensemble import IsolationForest
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from pypdf import PdfReader
 from groq import Groq
-from sentence_transformers import SentenceTransformer
 
 
 class SupplyIQ:
@@ -25,7 +23,7 @@ class SupplyIQ:
         self.vectorizer: Optional[TfidfVectorizer] = None
         self.doc_matrix = None
         self.doc_filename: Optional[str] = None
-        self.embedder: Optional[SentenceTransformer] = None
+        self.embedder = None
         self.doc_embeddings = None
 
         # Cached outputs
@@ -440,6 +438,7 @@ CONTRACT PROFILE:
     # Forecasting
     # =========================================================
     def run_forecast(self, periods: int = 30):
+        from prophet import Prophet
         if self.df is None:
             return None, "Error: Please upload ERP data first.", None, {}
 
@@ -665,6 +664,7 @@ CONTRACT PROFILE:
         self.doc_matrix = self.vectorizer.fit_transform(self.doc_chunks)
 
         try:
+            from sentence_transformers import SentenceTransformer
             self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
             self.doc_embeddings = self.embedder.encode(self.doc_chunks, convert_to_numpy=True)
         except Exception:
