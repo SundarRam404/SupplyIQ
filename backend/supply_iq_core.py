@@ -84,13 +84,6 @@ class SupplyIQ:
         if not self.doc_chunks:
             return ""
 
-        if self.embedder is not None and self.doc_embeddings is not None:
-            query_embedding = self.embedder.encode([query], convert_to_numpy=True)
-            scores = cosine_similarity(query_embedding, self.doc_embeddings).flatten()
-            top_indices = scores.argsort()[::-1][:top_k]
-            selected = [self.doc_chunks[i] for i in top_indices if scores[i] > 0]
-            return "\n\n".join(selected)
-
         if self.vectorizer is None or self.doc_matrix is None:
             return ""
 
@@ -104,6 +97,15 @@ class SupplyIQ:
         selected = [self.doc_chunks[i] for i in top_indices if scores[i] > 0]
 
         return "\n\n".join(selected)
+
+    def _get_contract_context(self, query: str, top_k: int = 4) -> str:
+        if not self.doc_chunks:
+            return ""
+
+        if len(self.doc_chunks) < 50:
+            return "\n\n".join(self.doc_chunks)
+
+        return self._retrieve_relevant_context(query, top_k=top_k)
 
     # (removed _estimate_inventory_risk)
 
@@ -182,8 +184,9 @@ ERP DATA PROFILE
         if not self.doc_chunks:
             return "No supplier contract uploaded."
 
-        context = self._retrieve_relevant_context(
-            "payment terms penalties delay obligations liability exclusivity lead time termination pricing risk"
+        context = self._get_contract_context(
+            "payment terms penalties delay obligations liability exclusivity lead time termination pricing risk",
+            top_k=4,
         )
 
         if not context:
@@ -410,8 +413,24 @@ CONTRACT PROFILE:
         daily["ds"] = pd.to_datetime(daily["ds"])
         daily = daily.sort_values("ds").reset_index(drop=True)
 
-        daily["delivery_delay_days"] = np.random.exponential(scale=2.0, size=len(daily))
-        daily["component_price"] = 50 + np.random.normal(0, 4, len(daily))
+        # Use real columns if they exist in the CSV, otherwise derive stable defaults
+        if "delivery_delay_days" in df.columns:
+            delay_series = pd.to_numeric(df["delivery_delay_days"], errors="coerce")
+            delay_series = delay_series.groupby(work["ds"].dt.date).mean()
+            daily["delivery_delay_days"] = delay_series.reindex(daily["ds"].dt.date).fillna(0).values
+        else:
+            # deterministic estimate based on demand volatility
+            demand_change = daily["y"].diff().abs().fillna(0)
+            daily["delivery_delay_days"] = (demand_change / max(daily["y"].mean(), 1)).clip(0, 10)
+
+        if "component_price" in df.columns:
+            price_series = pd.to_numeric(df["component_price"], errors="coerce")
+            price_series = price_series.groupby(work["ds"].dt.date).mean()
+            daily["component_price"] = price_series.reindex(daily["ds"].dt.date).fillna(method="ffill").fillna(method="bfill").values
+        else:
+            # derive stable proxy price based on demand trend (not random)
+            rolling = daily["y"].rolling(window=5, min_periods=1).mean()
+            daily["component_price"] = 50 + (rolling - rolling.mean()) * 0.1
 
         self.df = daily.copy()
         self.last_forecast_summary = None
@@ -478,12 +497,6 @@ CONTRACT PROFILE:
             risk = "LOW"
             reason = "Demand pattern appears comparatively stable."
 
-        self.last_ai_risk_snapshot = None
-        snapshot = self._get_ai_risk_snapshot()
-        final_risk = snapshot.get("demand_risk", risk)
-        final_reason = snapshot.get("demand_reason", reason)
-        final_evidence = snapshot.get("demand_evidence", "Unified forecast evidence")
-
         forecast_preview = upcoming.head(12).copy()
         forecast_preview["ds"] = forecast_preview["ds"].dt.strftime("%Y-%m-%d")
 
@@ -492,6 +505,23 @@ CONTRACT PROFILE:
             forecast_lines.append(
                 f"{row['ds']}: yhat={row['yhat']:.2f}, lower={row['yhat_lower']:.2f}, upper={row['yhat_upper']:.2f}"
             )
+
+        self.last_forecast_metrics = {
+            "avg_demand": avg_demand,
+            "peak_demand": peak_demand,
+            "mape": 0 if np.isnan(mape) else float(mape),
+            "recommended_inventory": recommended_inventory,
+            "risk_level": risk,
+            "reason": reason,
+            "volatility_pct": volatility_pct,
+            "peak_to_avg_ratio": peak_to_avg_ratio,
+        }
+
+        self.last_ai_risk_snapshot = None
+        snapshot = self._get_ai_risk_snapshot()
+        final_risk = snapshot.get("demand_risk", risk)
+        final_reason = snapshot.get("demand_reason", reason)
+        final_evidence = snapshot.get("demand_evidence", "Unified forecast evidence")
 
         summary = f"""
 ## AI Forecast Insight
@@ -511,16 +541,6 @@ CONTRACT PROFILE:
 
         self.last_forecast_summary = summary
         self.last_forecast_records = upcoming.to_dict(orient="records")
-        self.last_forecast_metrics = {
-            "avg_demand": avg_demand,
-            "peak_demand": peak_demand,
-            "mape": 0 if np.isnan(mape) else float(mape),
-            "recommended_inventory": recommended_inventory,
-            "risk_level": risk,
-            "reason": reason,
-            "volatility_pct": volatility_pct,
-            "peak_to_avg_ratio": peak_to_avg_ratio,
-        }
 
         return fig, summary, self.last_forecast_records, self.last_forecast_metrics
 
@@ -663,14 +683,6 @@ CONTRACT PROFILE:
         self.vectorizer = TfidfVectorizer(stop_words="english")
         self.doc_matrix = self.vectorizer.fit_transform(self.doc_chunks)
 
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            self.doc_embeddings = self.embedder.encode(self.doc_chunks, convert_to_numpy=True)
-        except Exception:
-            self.embedder = None
-            self.doc_embeddings = None
-
         self.last_contract_report = None
         self.last_contract_risk = "UNKNOWN"
         self.last_decision_report = None
@@ -685,8 +697,9 @@ CONTRACT PROFILE:
         if not self.doc_chunks or self.vectorizer is None or self.doc_matrix is None:
             return "Knowledge base not initialized. Please upload a supplier contract PDF first."
 
-        context = self._retrieve_relevant_context(
-            "forecast purchase order payment terms delivery penalties manufacturing capacity supplier obligations customer obligations inventory underutilization procurement lead times risk"
+        context = self._get_contract_context(
+            "forecast purchase order payment terms delivery penalties manufacturing capacity supplier obligations customer obligations inventory underutilization procurement lead times risk",
+            top_k=4,
         )
 
         if not context:
@@ -770,7 +783,7 @@ Contract context:
         if not query or not query.strip():
             return "Please enter a contract question."
 
-        context = self._retrieve_relevant_context(query, top_k=4)
+        context = self._get_contract_context(query, top_k=4)
         if not context:
             return "No relevant content found in the uploaded PDF."
 
