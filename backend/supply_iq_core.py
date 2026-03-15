@@ -38,6 +38,7 @@ class SupplyIQ:
         self.last_contract_risk: str = "UNKNOWN"
 
         self.last_decision_report: Optional[str] = None
+        self.last_ai_risk_snapshot: Optional[Dict] = None
 
     # =========================================================
     # Helpers
@@ -91,18 +92,7 @@ class SupplyIQ:
 
         return "\n\n".join(selected)
 
-    def _estimate_inventory_risk(self) -> str:
-        if self.last_forecast_metrics is None:
-            return "UNKNOWN"
-
-        volatility = self.last_forecast_metrics.get("volatility_pct", 0)
-        peak_ratio = self.last_forecast_metrics.get("peak_to_avg_ratio", 1.0)
-
-        if volatility > 45 or peak_ratio > 1.65:
-            return "HIGH"
-        if volatility > 25 or peak_ratio > 1.35:
-            return "MEDIUM"
-        return "LOW"
+    # (removed _estimate_inventory_risk)
 
     def _build_kpi_html(self, demand_risk: str, contract_risk: str, inventory_risk: str) -> str:
         def card(title: str, value: str) -> str:
@@ -151,10 +141,116 @@ class SupplyIQ:
         )
         return response.choices[0].message.content.strip()
 
+    def _build_data_profile(self) -> str:
+        if self.df is None or self.df.empty:
+            return "No ERP data uploaded."
+
+        avg_demand = float(self.df["y"].mean())
+        max_demand = float(self.df["y"].max())
+        min_demand = float(self.df["y"].min())
+        demand_std = float(self.df["y"].std()) if len(self.df) > 1 else 0.0
+        avg_delay = float(self.df["delivery_delay_days"].mean()) if "delivery_delay_days" in self.df.columns else 0.0
+        avg_price = float(self.df["component_price"].mean()) if "component_price" in self.df.columns else 0.0
+
+        return f"""
+ERP DATA PROFILE
+- Rows: {len(self.df)}
+- Date range: {self.df['ds'].min()} to {self.df['ds'].max()}
+- Average demand: {avg_demand:.2f}
+- Peak demand: {max_demand:.2f}
+- Minimum demand: {min_demand:.2f}
+- Demand std dev: {demand_std:.2f}
+- Average delivery delay days: {avg_delay:.2f}
+- Average component price: {avg_price:.2f}
+""".strip()
+
+    def _build_contract_profile(self) -> str:
+        if not self.doc_chunks:
+            return "No supplier contract uploaded."
+
+        context = self._retrieve_relevant_context(
+            "payment terms penalties delay obligations liability exclusivity lead time termination pricing risk"
+        )
+
+        if not context:
+            context = "\n\n".join(self.doc_chunks[:2])
+
+        return f"""
+CONTRACT PROFILE
+- Indexed chunks: {len(self.doc_chunks)}
+- Document: {self.doc_filename or 'Unknown'}
+- Relevant context:
+{context[:3000]}
+""".strip()
+
+    def _get_ai_risk_snapshot(self) -> Dict:
+        if self.last_ai_risk_snapshot is not None:
+            return self.last_ai_risk_snapshot
+
+        data_profile = self._build_data_profile()
+        contract_profile = self._build_contract_profile()
+
+        forecast_metrics = self.last_forecast_metrics or {}
+        anomaly_metrics = self.last_anomaly_metrics or {}
+
+        prompt = f"""
+You are SupplyIQ's Risk Scoring AI.
+
+Your job is to calculate THREE business risks using AI reasoning:
+1. DEMAND_FORECAST_RISK
+2. SUPPLIER_CONTRACT_RISK
+3. INVENTORY_RISK
+
+You must use the ERP profile, contract profile, anomaly results, and forecast metrics if available.
+If some information is missing, infer conservatively from what exists.
+Do NOT return UNKNOWN unless absolutely impossible.
+
+Return EXACTLY in this format:
+
+DEMAND_FORECAST_RISK: LOW or MEDIUM or HIGH
+SUPPLIER_CONTRACT_RISK: LOW or MEDIUM or HIGH
+INVENTORY_RISK: LOW or MEDIUM or HIGH
+RATIONALE:
+- Demand: ...
+- Contract: ...
+- Inventory: ...
+
+ERP / DEMAND CONTEXT:
+{data_profile}
+
+FORECAST METRICS:
+{forecast_metrics}
+
+ANOMALY METRICS:
+{anomaly_metrics}
+
+CONTRACT CONTEXT:
+{contract_profile}
+""".strip()
+
+        result = self._llm_generate(prompt)
+
+        def extract(label: str) -> str:
+            match = re.search(rf"{label}:\s*(LOW|MEDIUM|HIGH)", result, re.IGNORECASE)
+            return match.group(1).upper() if match else "MEDIUM"
+
+        snapshot = {
+            "demand_risk": extract("DEMAND_FORECAST_RISK"),
+            "contract_risk": extract("SUPPLIER_CONTRACT_RISK"),
+            "inventory_risk": extract("INVENTORY_RISK"),
+            "raw_response": result,
+        }
+
+        self.last_ai_risk_snapshot = snapshot
+        return snapshot
+
     def get_kpi_dashboard(self) -> str:
-        demand_risk = self.last_anomaly_metrics["risk_level"] if self.last_anomaly_metrics else "UNKNOWN"
-        contract_risk = self.last_contract_risk or "UNKNOWN"
-        inventory_risk = self._estimate_inventory_risk()
+        snapshot = self._get_ai_risk_snapshot()
+
+        demand_risk = snapshot.get("demand_risk", "MEDIUM")
+        contract_risk = snapshot.get("contract_risk", "MEDIUM")
+        inventory_risk = snapshot.get("inventory_risk", "MEDIUM")
+
         return self._build_kpi_html(demand_risk, contract_risk, inventory_risk)
 
     # =========================================================
@@ -229,6 +325,14 @@ class SupplyIQ:
         daily["component_price"] = 50 + np.random.normal(0, 4, len(daily))
 
         self.df = daily.copy()
+        self.last_forecast_summary = None
+        self.last_forecast_records = None
+        self.last_forecast_metrics = None
+        self.last_anomaly_summary = None
+        self.last_anomaly_records = None
+        self.last_anomaly_metrics = None
+        self.last_decision_report = None
+        self.last_ai_risk_snapshot = None
 
         if len(self.df) < 15:
             return (
@@ -308,6 +412,7 @@ class SupplyIQ:
             "volatility_pct": volatility_pct,
             "peak_to_avg_ratio": peak_to_avg_ratio,
         }
+        self.last_ai_risk_snapshot = None
 
         return fig, summary, self.last_forecast_records, self.last_forecast_metrics
 
@@ -402,6 +507,7 @@ class SupplyIQ:
         self.last_anomaly_summary = summary
         self.last_anomaly_records = records
         self.last_anomaly_metrics = metrics
+        self.last_ai_risk_snapshot = None
 
         return summary, records, metrics
 
@@ -434,6 +540,10 @@ class SupplyIQ:
 
         self.vectorizer = TfidfVectorizer(stop_words="english")
         self.doc_matrix = self.vectorizer.fit_transform(self.doc_chunks)
+        self.last_contract_report = None
+        self.last_contract_risk = "UNKNOWN"
+        self.last_decision_report = None
+        self.last_ai_risk_snapshot = None
 
         return (
             f"Contract indexed successfully from '{self.doc_filename}'. "
@@ -503,6 +613,7 @@ Contract context:
             self.last_contract_risk = "MEDIUM"
 
         self.last_contract_report = report
+        self.last_ai_risk_snapshot = None
         return report
 
     def query_documents(self, query: str) -> str:
