@@ -6,6 +6,6 @@ scikit-learn
 prophet
 pypdf
 groq
-sentence-transformers
 matplotlib
 plotly
+python-multipart
