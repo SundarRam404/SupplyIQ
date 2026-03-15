@@ -161,46 +161,83 @@ class SupplyIQ:
     # CSV / ERP
     # =========================================================
     def load_erp_data(self, file_path: str) -> str:
-        self.df = pd.read_csv(file_path)
+        df = None
+        last_error = None
 
-        if "ds" not in self.df.columns or "y" not in self.df.columns:
-            self.df["ds"] = pd.to_datetime(self.df.iloc[:, 0], errors="coerce")
-            self.df["y"] = pd.to_numeric(self.df.iloc[:, 1], errors="coerce")
-        else:
-            self.df["ds"] = pd.to_datetime(self.df["ds"], errors="coerce")
-            self.df["y"] = pd.to_numeric(self.df["y"], errors="coerce")
+        for encoding in ["utf-8", "utf-8-sig", "latin1"]:
+            try:
+                df = pd.read_csv(file_path, encoding=encoding)
+                break
+            except Exception as e:
+                last_error = e
 
-        if "delivery_delay_days" not in self.df.columns:
-            self.df["delivery_delay_days"] = np.random.exponential(scale=2.0, size=len(self.df))
-        else:
-            self.df["delivery_delay_days"] = pd.to_numeric(
-                self.df["delivery_delay_days"], errors="coerce"
+        if df is None:
+            raise ValueError(f"Could not read CSV file: {last_error}")
+
+        df.columns = [str(c).strip() for c in df.columns]
+        cols_lower = {c.lower(): c for c in df.columns}
+
+        date_col = None
+        product_col = None
+        demand_col = None
+
+        date_candidates = ["invoicedate", "date", "orderdate", "timestamp", "ds"]
+        product_candidates = ["stockcode", "product", "product_code", "item", "item_id", "sku"]
+        demand_candidates = ["quantity", "order_demand", "sales", "demand", "y", "units"]
+
+        for c in date_candidates:
+            if c in cols_lower:
+                date_col = cols_lower[c]
+                break
+
+        for c in product_candidates:
+            if c in cols_lower:
+                product_col = cols_lower[c]
+                break
+
+        for c in demand_candidates:
+            if c in cols_lower:
+                demand_col = cols_lower[c]
+                break
+
+        if date_col is None or demand_col is None:
+            raise ValueError(
+                f"Could not detect required columns. Found columns: {list(df.columns)}"
             )
 
-        if "component_price" not in self.df.columns:
-            self.df["component_price"] = 50 + np.random.normal(0, 4, len(self.df))
-        else:
-            self.df["component_price"] = pd.to_numeric(
-                self.df["component_price"], errors="coerce"
-            )
+        if product_col is None:
+            df["__product__"] = "ALL_PRODUCTS"
+            product_col = "__product__"
 
-        self.df = self.df.dropna(subset=["ds", "y"]).copy()
-        self.df["delivery_delay_days"] = self.df["delivery_delay_days"].fillna(
-            self.df["delivery_delay_days"].median()
-        )
-        self.df["component_price"] = self.df["component_price"].fillna(
-            self.df["component_price"].median()
-        )
-        self.df = self.df.sort_values("ds").reset_index(drop=True)
+        work = df[[date_col, product_col, demand_col]].copy()
+        work.columns = ["ds", "product", "y"]
+
+        work["ds"] = pd.to_datetime(work["ds"], errors="coerce")
+        work["y"] = pd.to_numeric(work["y"], errors="coerce")
+
+        work = work.dropna(subset=["ds", "y"])
+        work = work[work["y"] > 0]
+
+        if work.empty:
+            raise ValueError("No valid date/demand rows found after parsing the CSV.")
+
+        daily = work.groupby(work["ds"].dt.date)["y"].sum().reset_index()
+        daily["ds"] = pd.to_datetime(daily["ds"])
+        daily = daily.sort_values("ds").reset_index(drop=True)
+
+        daily["delivery_delay_days"] = np.random.exponential(scale=2.0, size=len(daily))
+        daily["component_price"] = 50 + np.random.normal(0, 4, len(daily))
+
+        self.df = daily.copy()
 
         if len(self.df) < 15:
             return (
-                f"ERP data loaded with {len(self.df)} rows. "
+                f"ERP data loaded with {len(self.df)} daily rows. "
                 "Upload worked, but 15+ rows are recommended for stronger forecasting."
             )
 
         return (
-            f"ERP data successfully loaded with {len(self.df)} rows. "
+            f"ERP data successfully loaded with {len(self.df)} daily rows. "
             "SupplyIQ is ready for demand forecasting and risk detection."
         )
 
