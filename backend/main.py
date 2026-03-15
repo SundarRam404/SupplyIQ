@@ -5,8 +5,9 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -26,9 +27,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-system = SupplyIQ(api_key=API_KEY)
 TEMP_DIR = Path(tempfile.gettempdir()) / "supplyiq_uploads"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+SYSTEMS = {}
+
+
+def get_system(session_id: Optional[str]) -> SupplyIQ:
+    sid = (session_id or "").strip()
+    if not sid:
+        sid = str(uuid4())
+
+    if sid not in SYSTEMS:
+        SYSTEMS[sid] = SupplyIQ(api_key=API_KEY)
+
+    return SYSTEMS[sid]
 
 
 class AskPayload(BaseModel):
@@ -47,15 +60,20 @@ def health():
 
 
 @app.get("/dashboard")
-def dashboard():
+def dashboard(x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     return {"dashboard_html": system.get_kpi_dashboard()}
 
 
 @app.post("/upload/csv")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(
+    file: UploadFile = File(...),
+    x_session_id: Optional[str] = Header(default=None),
+):
+    system = get_system(x_session_id)
     try:
         suffix = Path(file.filename or "data.csv").suffix or ".csv"
-        temp_path = TEMP_DIR / f"erp_upload{suffix}"
+        temp_path = TEMP_DIR / f"erp_upload_{x_session_id or 'anon'}{suffix}"
 
         with temp_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -75,9 +93,13 @@ async def upload_csv(file: UploadFile = File(...)):
 
 
 @app.post("/upload/pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    x_session_id: Optional[str] = Header(default=None),
+):
+    system = get_system(x_session_id)
     suffix = Path(file.filename or "contract.pdf").suffix or ".pdf"
-    temp_path = TEMP_DIR / f"contract_upload{suffix}"
+    temp_path = TEMP_DIR / f"contract_upload_{x_session_id or 'anon'}{suffix}"
     with temp_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -86,7 +108,8 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/forecast")
-def forecast():
+def forecast(x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     fig, summary, records, metrics = system.run_forecast(periods=30)
     if fig is None:
         raise HTTPException(status_code=400, detail=summary)
@@ -106,7 +129,8 @@ def forecast():
 
 
 @app.post("/anomalies")
-def anomalies():
+def anomalies(x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     summary, records, metrics = system.detect_anomalies()
     if summary.startswith("Error:"):
         raise HTTPException(status_code=400, detail=summary)
@@ -120,7 +144,8 @@ def anomalies():
 
 
 @app.post("/contract-report")
-def contract_report():
+def contract_report(x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     report = system.generate_contract_report()
     if report.startswith("Knowledge base not initialized") or report.startswith("No relevant"):
         raise HTTPException(status_code=400, detail=report)
@@ -129,7 +154,8 @@ def contract_report():
 
 
 @app.post("/ask-contract")
-def ask_contract(payload: AskPayload):
+def ask_contract(payload: AskPayload, x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     answer = system.query_documents(payload.query)
     if answer.startswith("Knowledge base not initialized") or answer.startswith("Please enter"):
         raise HTTPException(status_code=400, detail=answer)
@@ -138,7 +164,8 @@ def ask_contract(payload: AskPayload):
 
 
 @app.post("/decision")
-def decision():
+def decision(x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     report = system.generate_decision()
     if report.startswith("Error:"):
         raise HTTPException(status_code=400, detail=report)
@@ -147,7 +174,8 @@ def decision():
 
 
 @app.post("/scenario")
-def scenario(payload: ScenarioPayload):
+def scenario(payload: ScenarioPayload, x_session_id: Optional[str] = Header(default=None)):
+    system = get_system(x_session_id)
     scenario_name = payload.scenario_name
     custom_text = (payload.custom_scenario_text or "").strip()
 
