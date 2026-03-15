@@ -8,3 +8,5 @@ scikit-learn
 groq
 pypdf
 matplotlib
+sentence-transformers
+faiss-cpu
