@@ -426,7 +426,7 @@ CONTRACT PROFILE:
         if "component_price" in df.columns:
             price_series = pd.to_numeric(df["component_price"], errors="coerce")
             price_series = price_series.groupby(work["ds"].dt.date).mean()
-            daily["component_price"] = price_series.reindex(daily["ds"].dt.date).fillna(method="ffill").fillna(method="bfill").values
+            daily["component_price"] = (price_series.reindex(daily["ds"].dt.date).ffill().bfill().values)
         else:
             # derive stable proxy price based on demand trend (not random)
             rolling = daily["y"].rolling(window=5, min_periods=1).mean()
